@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local app data: videos and transcripts
+data/
+temp/
+
+# Logs
+*.log
+server.log
+server.err.log
+
+# Local/editor files
+.env
+.env.*
+.vscode/
+.idea/
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Large media files, in case they are placed outside data/
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.mp3
+*.m4a
+*.wav
+*.flac

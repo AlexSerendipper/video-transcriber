@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>本地视频转文字</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="history-panel">
+        <div class="history-head">
+          <h2>历史</h2>
+          <button id="refreshHistoryBtn" type="button" title="刷新历史">↻</button>
+        </div>
+        <div id="historyList" class="history-list empty">暂无历史文件</div>
+      </aside>
+
+      <section class="main-panel">
+        <section class="topbar">
+          <div>
+            <p class="kicker">Local Transcript</p>
+            <h1>视频转文字</h1>
+          </div>
+          <div class="controls">
+            <select id="preset" aria-label="识别模式">
+              <option value="fast" selected>速度优先</option>
+              <option value="balanced">平衡</option>
+              <option value="accurate">准确优先</option>
+            </select>
+            <button id="startBtn" type="button" disabled>开始转写</button>
+            <button id="copyBtn" type="button" disabled>复制全文</button>
+          </div>
+        </section>
+
+        <section id="dropZone" class="drop-zone">
+          <input id="fileInput" type="file" accept="video/*,audio/*" />
+          <div>
+            <strong>拖入视频，或点击选择文件</strong>
+            <span id="fileName">支持 mp4、mov、mkv、mp3、m4a 等常见媒体文件</span>
+          </div>
+        </section>
+
+        <section class="status-panel">
+          <div class="progress">
+            <div id="progressBar"></div>
+          </div>
+          <span id="statusText">等待上传视频</span>
+          <button id="cancelBtn" type="button" disabled>终止</button>
+        </section>
+
+        <section class="workspace">
+          <div class="player-panel">
+            <video id="video" controls preload="metadata"></video>
+          </div>
+          <div id="splitter" class="splitter" role="separator" aria-label="调整视频和文字区域宽度" aria-orientation="vertical"></div>
+          <article class="transcript-panel">
+            <div class="transcript-head">
+              <h2>文字稿</h2>
+              <span id="wordCount">0 字</span>
+            </div>
+            <div id="transcript" class="transcript empty">转写完成后，文字会显示在这里。点击句子可以跳到视频对应位置。</div>
+          </article>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

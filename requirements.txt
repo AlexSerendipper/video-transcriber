@@ -1,0 +1,11 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+faster-whisper>=1.1.0
+opencc-python-reimplemented>=0.1.7
+funasr-onnx>=0.4.1
+huggingface-hub>=0.21
+jieba>=0.42.1
+modelscope>=1.37.0
+nvidia-cublas-cu12>=12.9.2.10; platform_system == "Windows"
+nvidia-cudnn-cu12>=9.22.0.52; platform_system == "Windows"
