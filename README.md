@@ -48,6 +48,25 @@ Then open:
 http://127.0.0.1:8000
 ```
 
+## Stop
+
+If you started the app from a PowerShell window with `.\run.ps1`, stop it by pressing:
+
+```text
+Ctrl + C
+```
+
+If the server is running in the background, stop the local `uvicorn` process:
+
+```powershell
+$procs = Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -like '*uvicorn*app.main:app*' -and $_.Name -like 'python*'
+}
+foreach ($p in $procs) {
+  Stop-Process -Id $p.ProcessId -Force
+}
+```
+
 ## Model Presets
 
 - Speed: `small / cuda / int8_float16 / beam 1`
