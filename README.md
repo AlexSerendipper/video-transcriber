@@ -37,9 +37,25 @@ The app installs Python dependencies into `.venv` on first run. CUDA runtime DLL
 
 ## Start
 
+The easiest way on Windows is to double-click:
+
+```text
+Start Local Video Transcriber.cmd
+```
+
+Keep the startup window open while using the app. Closing that window stops the local server.
+
+You can also start from PowerShell:
+
 ```powershell
 cd D:\CodexProject\video-transcriber
 .\run.ps1
+```
+
+If PowerShell blocks scripts on your machine, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
 Then open:
@@ -50,7 +66,9 @@ http://127.0.0.1:8000
 
 ## Stop
 
-If you started the app from a PowerShell window with `.\run.ps1`, stop it by pressing:
+If you started with `Start Local Video Transcriber.cmd`, close the startup window.
+
+If you started from PowerShell with `.\run.ps1`, stop it by pressing:
 
 ```text
 Ctrl + C
