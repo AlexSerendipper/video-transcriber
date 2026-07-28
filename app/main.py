@@ -25,16 +25,17 @@ TEMP_DIR.mkdir(exist_ok=True)
 ITEMS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Local Video Transcriber")
+API_VERSION = 2
 
 state_lock = threading.Lock()
-pending_uploads: dict[str, Path] = {}
 cancel_events: dict[str, threading.Event] = {}
+ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 current_task: dict = {
     "id": None,
     "hash": None,
     "status": "idle",
     "progress": 0,
-    "message": "等待上传视频",
+    "message": "等待导入视频",
     "video_path": None,
     "video_name": None,
     "segments": [],
@@ -82,6 +83,39 @@ def snapshot() -> dict:
     return data
 
 
+def metadata_status(metadata: dict) -> str:
+    status = metadata.get("status")
+    if status in {"done", "untranscribed"}:
+        return status
+    return "done" if "segments" in metadata else "untranscribed"
+
+
+def ensure_task_idle() -> None:
+    if snapshot().get("status") in ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="当前正在转写，请先等待完成或终止任务")
+
+
+def activate_record(file_hash: str, metadata: dict, message: str = "已打开历史记录") -> None:
+    video_path = item_dir(file_hash) / metadata["source_file"]
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="历史视频副本不存在")
+    status = metadata_status(metadata)
+    set_state(
+        id=None,
+        hash=file_hash,
+        status=status,
+        progress=100 if status == "done" else 0,
+        message=message,
+        video_path=video_path,
+        video_name=metadata["video_name"],
+        segments=metadata.get("segments", []),
+        duration=metadata.get("duration", 0),
+        error=None,
+        engine=None,
+        fallback_reason=None,
+    )
+
+
 def hash_and_save_upload(upload: UploadFile, target: Path) -> str:
     digest = hashlib.sha256()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -95,69 +129,81 @@ def hash_and_save_upload(upload: UploadFile, target: Path) -> str:
     return digest.hexdigest()
 
 
-@app.post("/api/transcribe")
-async def transcribe(
-    file: UploadFile = File(...),
-    preset: str = Form("balanced"),
-    force: bool = Form(False),
-) -> dict:
+@app.post("/api/import")
+async def import_video(file: UploadFile = File(...)) -> dict:
+    ensure_task_idle()
     if not file.filename:
         raise HTTPException(status_code=400, detail="请选择视频文件")
 
-    task_id = uuid.uuid4().hex
+    upload_id = uuid.uuid4().hex
     suffix = Path(file.filename).suffix or ".mp4"
-    temp_path = TEMP_DIR / f"upload_{task_id}{suffix}"
+    temp_path = TEMP_DIR / f"upload_{upload_id}{suffix}"
     file_hash = hash_and_save_upload(file, temp_path)
     existing = read_metadata(file_hash)
 
-    if existing and not force:
-        pending_uploads[file_hash] = temp_path
+    if existing:
+        temp_path.unlink(missing_ok=True)
+        activate_record(file_hash, existing, "已打开已有视频")
         return {
             "exists": True,
             "hash": file_hash,
             "item": history_summary(existing),
         }
 
-    return start_transcription_task(task_id, file_hash, temp_path, file.filename, preset, suffix)
+    destination = source_path(file_hash, suffix)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(temp_path), destination)
+    metadata = {
+        "hash": file_hash,
+        "video_name": file.filename,
+        "source_file": destination.name,
+        "duration": 0,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "status": "untranscribed",
+        "segments": [],
+    }
+    write_metadata(file_hash, metadata)
+    activate_record(file_hash, metadata, "视频已导入，尚未转写")
+    return {
+        "exists": False,
+        "hash": file_hash,
+        "item": history_summary(metadata),
+    }
 
 
-@app.post("/api/history/{file_hash}/retranscribe")
-def retranscribe_existing(file_hash: str, preset: str = Form("balanced")) -> dict:
-    temp_path = pending_uploads.pop(file_hash, None)
-    if temp_path is None or not temp_path.exists():
-        raise HTTPException(status_code=404, detail="没有可复用的上传文件，请重新选择视频")
-
-    old_meta = read_metadata(file_hash)
-    video_name = old_meta.get("video_name") if old_meta else temp_path.name
-    suffix = Path(video_name).suffix or temp_path.suffix or ".mp4"
-    task_id = uuid.uuid4().hex
-    return start_transcription_task(task_id, file_hash, temp_path, video_name, preset, suffix)
+@app.post("/api/history/{file_hash}/transcribe")
+def transcribe_imported(file_hash: str, preset: str = Form("balanced")) -> dict:
+    ensure_task_idle()
+    metadata = read_metadata(file_hash)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="历史记录不存在")
+    video_path = item_dir(file_hash) / metadata["source_file"]
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="历史视频副本不存在")
+    metadata["status"] = "untranscribed"
+    metadata["segments"] = []
+    write_metadata(file_hash, metadata)
+    return start_transcription_task(file_hash, video_path, metadata, preset)
 
 
 def start_transcription_task(
-    task_id: str,
     file_hash: str,
-    temp_path: Path,
-    video_name: str,
+    video_path: Path,
+    metadata: dict,
     preset: str,
-    suffix: str,
 ) -> dict:
-    destination = source_path(file_hash, suffix)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        destination.unlink()
-    shutil.move(str(temp_path), destination)
+    task_id = uuid.uuid4().hex
 
     set_state(
         id=task_id,
         hash=file_hash,
         status="queued",
         progress=3,
-        message="视频已上传，准备转写",
-        video_path=destination,
-        video_name=video_name,
+        message="正在准备转写",
+        video_path=video_path,
+        video_name=metadata["video_name"],
         segments=[],
-        duration=0,
+        duration=metadata.get("duration", 0),
         error=None,
         engine=None,
         fallback_reason=None,
@@ -166,11 +212,11 @@ def start_transcription_task(
     cancel_events[task_id] = threading.Event()
     worker = threading.Thread(
         target=run_task,
-        args=(task_id, file_hash, destination, video_name, preset),
+        args=(task_id, file_hash, video_path, metadata["video_name"], preset),
         daemon=True,
     )
     worker.start()
-    return {"exists": False, "task_id": task_id, "hash": file_hash}
+    return {"task_id": task_id, "hash": file_hash}
 
 
 def run_task(task_id: str, file_hash: str, video_path: Path, video_name: str, preset: str) -> None:
@@ -187,17 +233,21 @@ def run_task(task_id: str, file_hash: str, video_path: Path, video_name: str, pr
         blocks = transcribe_video(video_path, preset, progress, should_cancel=should_cancel)
         segments = [asdict(block) for block in blocks]
         duration = round(max((segment["end"] for segment in segments), default=0), 2)
+        previous = read_metadata(file_hash) or {}
         metadata = {
             "hash": file_hash,
             "video_name": video_name,
             "source_file": video_path.name,
             "duration": duration,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": previous.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+            "transcribed_at": datetime.now().isoformat(timespec="seconds"),
+            "status": "done",
             "segments": segments,
         }
         write_metadata(file_hash, metadata)
         if snapshot().get("id") == task_id:
             set_state(
+                id=None,
                 status="done",
                 progress=100,
                 message="完成",
@@ -208,25 +258,52 @@ def run_task(task_id: str, file_hash: str, video_path: Path, video_name: str, pr
                 error=None,
             )
     except TranscriptionCancelled:
-        shutil.rmtree(item_dir(file_hash), ignore_errors=True)
+        metadata = read_metadata(file_hash) or {
+            "hash": file_hash,
+            "video_name": video_name,
+            "source_file": video_path.name,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        metadata.update(status="untranscribed", segments=[])
+        write_metadata(file_hash, metadata)
         if snapshot().get("id") == task_id:
             set_state(
                 id=None,
-                hash=None,
-                status="cancelled",
+                hash=file_hash,
+                status="untranscribed",
                 progress=0,
-                message="已终止转写，并删除本次副本",
-                video_path=None,
-                video_name=None,
+                message="已终止转写，视频已保留",
+                video_path=video_path,
+                video_name=video_name,
                 segments=[],
-                duration=0,
+                duration=metadata.get("duration", 0),
                 error=None,
                 engine=None,
                 fallback_reason=None,
             )
     except Exception as exc:
+        metadata = read_metadata(file_hash) or {
+            "hash": file_hash,
+            "video_name": video_name,
+            "source_file": video_path.name,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        metadata.update(status="untranscribed", segments=[])
+        write_metadata(file_hash, metadata)
         if snapshot().get("id") == task_id:
-            set_state(status="error", progress=100, message="转写失败", error=str(exc))
+            set_state(
+                id=None,
+                status="untranscribed",
+                progress=0,
+                message="转写失败，视频已保留",
+                video_path=video_path,
+                video_name=video_name,
+                segments=[],
+                duration=metadata.get("duration", 0),
+                error=str(exc),
+                engine=None,
+                fallback_reason=None,
+            )
     finally:
         cancel_events.pop(task_id, None)
 
@@ -249,6 +326,7 @@ def cancel_task() -> dict:
 def status() -> dict:
     data = snapshot()
     return {
+        "api_version": API_VERSION,
         "id": data["id"],
         "hash": data["hash"],
         "status": data["status"],
@@ -294,7 +372,7 @@ def history() -> dict:
         items.append(history_summary(metadata))
 
     data = snapshot()
-    if data.get("status") in {"queued", "running", "cancelling"} and data.get("hash"):
+    if data.get("status") in ACTIVE_STATUSES and data.get("hash"):
         matched = False
         for item in items:
             if item["hash"] == data["hash"]:
@@ -318,44 +396,20 @@ def history() -> dict:
 
 @app.post("/api/history/{file_hash}/open")
 def open_history(file_hash: str) -> dict:
+    ensure_task_idle()
     metadata = read_metadata(file_hash)
     if not metadata:
         raise HTTPException(status_code=404, detail="历史记录不存在")
-
-    pending = pending_uploads.pop(file_hash, None)
-    if pending and pending.exists():
-        pending.unlink(missing_ok=True)
-
-    video_path = item_dir(file_hash) / metadata["source_file"]
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail="历史视频副本不存在")
-
-    set_state(
-        id=None,
-        hash=file_hash,
-        status="done",
-        progress=100,
-        message="已打开历史记录",
-        video_path=video_path,
-        video_name=metadata["video_name"],
-        segments=metadata["segments"],
-        duration=metadata.get("duration", 0),
-        error=None,
-        engine=None,
-        fallback_reason=None,
-    )
-    return {"ok": True}
+    activate_record(file_hash, metadata)
+    return {"ok": True, "item": history_summary(metadata)}
 
 
 @app.delete("/api/history/{file_hash}")
 def delete_history(file_hash: str) -> dict:
+    ensure_task_idle()
     target = item_dir(file_hash)
     if not target.exists():
         raise HTTPException(status_code=404, detail="历史记录不存在")
-
-    pending = pending_uploads.pop(file_hash, None)
-    if pending and pending.exists():
-        pending.unlink(missing_ok=True)
 
     shutil.rmtree(target)
     if snapshot().get("hash") == file_hash:
@@ -364,7 +418,7 @@ def delete_history(file_hash: str) -> dict:
             hash=None,
             status="idle",
             progress=0,
-            message="等待上传视频",
+            message="等待导入视频",
             video_path=None,
             video_name=None,
             segments=[],
@@ -382,7 +436,7 @@ def history_summary(metadata: dict) -> dict:
         "video_name": metadata["video_name"],
         "duration": metadata.get("duration", 0),
         "created_at": metadata.get("created_at"),
-        "status": metadata.get("status", "done"),
+        "status": metadata_status(metadata),
     }
 
 

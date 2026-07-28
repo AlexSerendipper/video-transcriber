@@ -4,23 +4,64 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>本地视频转文字</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260728-3" />
   </head>
   <body>
-    <main class="app-shell">
-      <aside class="history-panel">
+    <main class="app-shell history-collapsed">
+      <aside id="historyPanel" class="history-panel" aria-hidden="true">
         <div class="history-head">
-          <h2>历史</h2>
-          <button id="refreshHistoryBtn" type="button" title="刷新历史">↻</button>
+          <div>
+            <p class="kicker">Local Archive</p>
+            <h2>历史记录</h2>
+          </div>
+          <div class="history-head-actions">
+            <button id="closeHistoryBtn" class="icon-button" type="button" title="收起历史" aria-label="收起历史">‹</button>
+            <button id="refreshHistoryBtn" class="icon-button" type="button" title="刷新历史" aria-label="刷新历史">↻</button>
+          </div>
         </div>
-        <div id="historyList" class="history-list empty">暂无历史文件</div>
+
+        <div class="history-body">
+          <label class="history-search" for="historySearchInput">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="m16 16 4 4"></path>
+            </svg>
+            <input id="historySearchInput" type="search" placeholder="搜索视频文件名" autocomplete="off" />
+          </label>
+          <div id="historyList" class="history-list empty" aria-label="历史记录列表">暂无历史文件</div>
+        </div>
       </aside>
+
+      <button
+        id="historyBackdrop"
+        class="history-backdrop"
+        type="button"
+        aria-label="关闭历史记录"
+        hidden
+      ></button>
 
       <section class="main-panel">
         <section class="topbar">
           <div>
             <p class="kicker">Local Transcript</p>
-            <h1>视频转文字</h1>
+            <div class="title-row">
+              <button
+                id="openHistoryBtn"
+                class="history-trigger"
+                type="button"
+                title="打开历史记录"
+                aria-label="打开历史记录"
+                aria-controls="historyPanel"
+                aria-expanded="false"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+                  <path d="M3 4v5h5"></path>
+                  <path d="M12 7v5l3 2"></path>
+                </svg>
+              </button>
+              <h1>视频转文字</h1>
+            </div>
           </div>
           <div class="controls">
             <select id="preset" aria-label="识别模式">
@@ -28,25 +69,10 @@
               <option value="balanced">平衡</option>
               <option value="accurate">准确优先</option>
             </select>
+            <input id="fileInput" class="visually-hidden" type="file" accept="video/*,audio/*" />
+            <button id="importBtn" type="button">导入视频</button>
             <button id="startBtn" type="button" disabled>开始转写</button>
-            <button id="copyBtn" type="button" disabled>复制全文</button>
           </div>
-        </section>
-
-        <section id="dropZone" class="drop-zone">
-          <input id="fileInput" type="file" accept="video/*,audio/*" />
-          <div>
-            <strong>拖入视频，或点击选择文件</strong>
-            <span id="fileName">支持 mp4、mov、mkv、mp3、m4a 等常见媒体文件</span>
-          </div>
-        </section>
-
-        <section class="status-panel">
-          <div class="progress">
-            <div id="progressBar"></div>
-          </div>
-          <span id="statusText">等待上传视频</span>
-          <button id="cancelBtn" type="button" disabled>终止</button>
         </section>
 
         <section class="workspace">
@@ -59,11 +85,23 @@
               <h2>文字稿</h2>
               <span id="wordCount">0 字</span>
             </div>
-            <div id="transcript" class="transcript empty">转写完成后，文字会显示在这里。点击句子可以跳到视频对应位置。</div>
+            <div class="transcript-viewport">
+              <div id="transcript" class="transcript empty">请先导入视频</div>
+              <section id="transcriptionProgress" class="transcription-progress" hidden aria-live="polite">
+                <div class="progress-copy">
+                  <strong id="statusText">正在准备转写</strong>
+                  <span id="progressValue">0%</span>
+                </div>
+                <div class="progress" aria-hidden="true">
+                  <div id="progressBar"></div>
+                </div>
+                <button id="cancelBtn" type="button">终止转写</button>
+              </section>
+            </div>
           </article>
         </section>
       </section>
     </main>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=20260728-3"></script>
   </body>
 </html>
