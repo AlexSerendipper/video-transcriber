@@ -23,7 +23,7 @@ if ($Port -lt 1 -or $Port -gt 65535) {
 $Url = "http://127.0.0.1:$Port"
 $StatusUrl = "$Url/api/status"
 $SpecUrl = "$Url/openapi.json"
-$ExpectedApiVersion = 2
+$ExpectedApiVersion = 3
 $existing = $null
 $isProjectBackend = $false
 

@@ -12,7 +12,16 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from .link_importer import (
+    LinkImportCancelled,
+    LinkImportError,
+    download_video,
+    extract_video_url,
+    identify_platform,
+    resolve_video,
+)
 from .transcriber import TranscriptionCancelled, transcribe_video
 
 
@@ -25,11 +34,15 @@ TEMP_DIR.mkdir(exist_ok=True)
 ITEMS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Local Video Transcriber")
-API_VERSION = 2
+API_VERSION = 3
 
 state_lock = threading.Lock()
 cancel_events: dict[str, threading.Event] = {}
-ACTIVE_STATUSES = {"queued", "running", "cancelling"}
+link_jobs_lock = threading.Lock()
+link_jobs: dict[str, dict] = {}
+TRANSCRIPTION_STATUSES = {"queued", "running", "cancelling"}
+LINK_IMPORT_STATUSES = {"link_resolving", "link_downloading", "link_saving", "link_cancelling"}
+ACTIVE_STATUSES = TRANSCRIPTION_STATUSES | LINK_IMPORT_STATUSES
 current_task: dict = {
     "id": None,
     "hash": None,
@@ -44,6 +57,10 @@ current_task: dict = {
     "engine": None,
     "fallback_reason": None,
 }
+
+
+class LinkImportRequest(BaseModel):
+    text: str
 
 
 def item_dir(file_hash: str) -> Path:
@@ -81,6 +98,11 @@ def snapshot() -> dict:
         data = dict(current_task)
     data["video_path"] = str(data["video_path"]) if data.get("video_path") else None
     return data
+
+
+def raw_state_snapshot() -> dict:
+    with state_lock:
+        return dict(current_task)
 
 
 def metadata_status(metadata: dict) -> str:
@@ -129,20 +151,28 @@ def hash_and_save_upload(upload: UploadFile, target: Path) -> str:
     return digest.hexdigest()
 
 
-@app.post("/api/import")
-async def import_video(file: UploadFile = File(...)) -> dict:
-    ensure_task_idle()
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="请选择视频文件")
+def hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-    upload_id = uuid.uuid4().hex
-    suffix = Path(file.filename).suffix or ".mp4"
-    temp_path = TEMP_DIR / f"upload_{upload_id}{suffix}"
-    file_hash = hash_and_save_upload(file, temp_path)
+
+def save_imported_file(
+    temp_path: Path,
+    file_hash: str,
+    video_name: str,
+    *,
+    source_details: dict | None = None,
+) -> dict:
     existing = read_metadata(file_hash)
-
     if existing:
         temp_path.unlink(missing_ok=True)
+        if source_details:
+            existing["video_name"] = video_name
+            existing.update(source_details)
+            write_metadata(file_hash, existing)
         activate_record(file_hash, existing, "已打开已有视频")
         return {
             "exists": True,
@@ -150,24 +180,221 @@ async def import_video(file: UploadFile = File(...)) -> dict:
             "item": history_summary(existing),
         }
 
+    suffix = temp_path.suffix or ".mp4"
     destination = source_path(file_hash, suffix)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(temp_path), destination)
     metadata = {
         "hash": file_hash,
-        "video_name": file.filename,
+        "video_name": video_name,
         "source_file": destination.name,
         "duration": 0,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "status": "untranscribed",
         "segments": [],
     }
+    if source_details:
+        metadata.update(source_details)
     write_metadata(file_hash, metadata)
     activate_record(file_hash, metadata, "视频已导入，尚未转写")
     return {
         "exists": False,
         "hash": file_hash,
         "item": history_summary(metadata),
+    }
+
+
+def find_history_by_source(platform: str, source_id: str) -> tuple[str, dict] | None:
+    for path in ITEMS_DIR.glob("*/result.json"):
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        if metadata.get("source_platform") == platform and metadata.get("source_id") == source_id:
+            return metadata["hash"], metadata
+    return None
+
+
+@app.post("/api/import")
+async def import_video(file: UploadFile = File(...)) -> dict:
+    ensure_task_idle()
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请选择视频文件")
+
+    upload_id = uuid.uuid4().hex
+    video_name = Path(file.filename).name
+    suffix = Path(video_name).suffix or ".mp4"
+    temp_path = TEMP_DIR / f"upload_{upload_id}{suffix}"
+    try:
+        file_hash = hash_and_save_upload(file, temp_path)
+        return save_imported_file(temp_path, file_hash, video_name)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+@app.post("/api/link-import", status_code=202)
+def start_link_import(request: LinkImportRequest) -> dict:
+    ensure_task_idle()
+    try:
+        url = extract_video_url(request.text)
+        platform = identify_platform(url)
+    except LinkImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    task_id = uuid.uuid4().hex
+    previous_state = raw_state_snapshot()
+    cancel_events[task_id] = threading.Event()
+
+    with link_jobs_lock:
+        completed = [key for key, job in link_jobs.items() if job["status"] not in LINK_IMPORT_STATUSES]
+        for key in completed[:-20]:
+            link_jobs.pop(key, None)
+        link_jobs[task_id] = {
+            "task_id": task_id,
+            "status": "link_resolving",
+            "progress": 5,
+            "message": "正在检查视频链接",
+            "platform": platform,
+            "error": None,
+            "result": None,
+            "previous_state": previous_state,
+        }
+
+    set_state(
+        id=task_id,
+        status="link_resolving",
+        progress=5,
+        message="正在检查视频链接",
+        error=None,
+        engine=None,
+        fallback_reason=None,
+    )
+    worker = threading.Thread(
+        target=run_link_import,
+        args=(task_id, request.text),
+        daemon=True,
+    )
+    worker.start()
+    return {"task_id": task_id, "platform": platform}
+
+
+@app.get("/api/link-import/{task_id}")
+def link_import_status(task_id: str) -> dict:
+    with link_jobs_lock:
+        job = link_jobs.get(task_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="链接导入任务不存在")
+        return link_job_summary(job)
+
+
+@app.post("/api/link-import/{task_id}/cancel")
+def cancel_link_import(task_id: str) -> dict:
+    with link_jobs_lock:
+        job = link_jobs.get(task_id)
+        if not job or job["status"] not in LINK_IMPORT_STATUSES:
+            return {"ok": False, "message": "链接导入任务已经结束"}
+        job.update(status="link_cancelling", message="正在终止链接导入")
+    event = cancel_events.get(task_id)
+    if event:
+        event.set()
+    if snapshot().get("id") == task_id:
+        set_state(status="link_cancelling", message="正在终止链接导入")
+    return {"ok": True}
+
+
+def run_link_import(task_id: str, text: str) -> None:
+    task_temp_dir = TEMP_DIR / f"link_{task_id}"
+    cancel_event = cancel_events.get(task_id)
+
+    def should_cancel() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    def progress(value: int, message: str) -> None:
+        status = "link_downloading" if value >= 35 else "link_resolving"
+        update_link_job(task_id, status=status, progress=value, message=message)
+        if snapshot().get("id") == task_id:
+            set_state(status=status, progress=value, message=message)
+
+    try:
+        resolved = resolve_video(text, progress, should_cancel)
+        if should_cancel():
+            raise LinkImportCancelled("已终止链接导入")
+
+        matched = find_history_by_source(resolved.platform, resolved.source_id)
+        if matched:
+            file_hash, metadata = matched
+            activate_record(file_hash, metadata, "已打开由该链接导入的视频")
+            result = {"exists": True, "hash": file_hash, "item": history_summary(metadata)}
+            update_link_job(
+                task_id,
+                status="done",
+                progress=100,
+                message="已打开已有视频",
+                result=result,
+            )
+            return
+
+        downloaded = download_video(resolved, task_temp_dir, progress, should_cancel)
+        if should_cancel():
+            raise LinkImportCancelled("已终止链接导入")
+        update_link_job(task_id, status="link_saving", progress=90, message="正在写入本地历史")
+        if snapshot().get("id") == task_id:
+            set_state(status="link_saving", progress=90, message="正在写入本地历史")
+        display_name = resolved.title.strip() or resolved.source_id
+        suffix = downloaded.suffix or ".mp4"
+        if not display_name.lower().endswith(suffix.lower()):
+            display_name = f"{display_name}{suffix}"
+        result = save_imported_file(
+            downloaded,
+            hash_file(downloaded),
+            display_name,
+            source_details={
+                "source_type": "url",
+                "source_url": resolved.canonical_url,
+                "source_platform": resolved.platform,
+                "source_id": resolved.source_id,
+                "source_title": resolved.title,
+            },
+        )
+        update_link_job(
+            task_id,
+            status="done",
+            progress=100,
+            message="视频已导入",
+            result=result,
+        )
+    except LinkImportCancelled as exc:
+        restore_link_import_previous_state(task_id)
+        update_link_job(task_id, status="cancelled", progress=0, message="链接导入已终止", error=str(exc))
+    except Exception as exc:
+        restore_link_import_previous_state(task_id)
+        update_link_job(task_id, status="failed", progress=0, message="链接导入失败", error=str(exc))
+    finally:
+        cancel_events.pop(task_id, None)
+        shutil.rmtree(task_temp_dir, ignore_errors=True)
+
+
+def update_link_job(task_id: str, **updates: object) -> None:
+    with link_jobs_lock:
+        job = link_jobs.get(task_id)
+        if job:
+            job.update(updates)
+
+
+def restore_link_import_previous_state(task_id: str) -> None:
+    with link_jobs_lock:
+        job = link_jobs.get(task_id)
+        previous_state = dict(job.get("previous_state") or {}) if job else {}
+    if previous_state and snapshot().get("id") == task_id:
+        set_state(**previous_state)
+
+
+def link_job_summary(job: dict) -> dict:
+    return {
+        "task_id": job["task_id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "platform": job["platform"],
+        "error": job["error"],
+        "result": job["result"],
     }
 
 
@@ -234,16 +461,17 @@ def run_task(task_id: str, file_hash: str, video_path: Path, video_name: str, pr
         segments = [asdict(block) for block in blocks]
         duration = round(max((segment["end"] for segment in segments), default=0), 2)
         previous = read_metadata(file_hash) or {}
-        metadata = {
-            "hash": file_hash,
-            "video_name": video_name,
-            "source_file": video_path.name,
-            "duration": duration,
-            "created_at": previous.get("created_at") or datetime.now().isoformat(timespec="seconds"),
-            "transcribed_at": datetime.now().isoformat(timespec="seconds"),
-            "status": "done",
-            "segments": segments,
-        }
+        metadata = dict(previous)
+        metadata.update(
+            hash=file_hash,
+            video_name=video_name,
+            source_file=video_path.name,
+            duration=duration,
+            created_at=previous.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+            transcribed_at=datetime.now().isoformat(timespec="seconds"),
+            status="done",
+            segments=segments,
+        )
         write_metadata(file_hash, metadata)
         if snapshot().get("id") == task_id:
             set_state(
@@ -372,7 +600,7 @@ def history() -> dict:
         items.append(history_summary(metadata))
 
     data = snapshot()
-    if data.get("status") in ACTIVE_STATUSES and data.get("hash"):
+    if data.get("status") in TRANSCRIPTION_STATUSES and data.get("hash"):
         matched = False
         for item in items:
             if item["hash"] == data["hash"]:

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>本地视频转文字</title>
-    <link rel="stylesheet" href="/styles.css?v=20260728-3" />
+    <link rel="stylesheet" href="/styles.css?v=20260729-1" />
   </head>
   <body>
     <main class="app-shell history-collapsed">
@@ -70,7 +70,8 @@
               <option value="accurate">准确优先</option>
             </select>
             <input id="fileInput" class="visually-hidden" type="file" accept="video/*,audio/*" />
-            <button id="importBtn" type="button">导入视频</button>
+            <button id="importBtn" type="button">导入本地视频</button>
+            <button id="linkImportBtn" class="secondary-button" type="button">链接导入</button>
             <button id="startBtn" type="button" disabled>开始转写</button>
           </div>
         </section>
@@ -102,6 +103,51 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=20260728-3"></script>
+
+    <dialog id="linkImportDialog" class="link-import-dialog" aria-labelledby="linkImportTitle">
+      <div class="dialog-card">
+        <header class="dialog-head">
+          <div>
+            <p class="kicker">Import from URL</p>
+            <h2 id="linkImportTitle">链接导入视频</h2>
+          </div>
+          <button id="closeLinkImportBtn" class="dialog-close" type="button" aria-label="关闭链接导入">×</button>
+        </header>
+
+        <form id="linkImportForm" class="link-import-form">
+          <label for="linkImportText">粘贴视频链接或完整分享文本</label>
+          <textarea
+            id="linkImportText"
+            rows="5"
+            placeholder="例如：复制这段内容打开抖音…… https://v.douyin.com/xxxx/"
+            autocomplete="off"
+          ></textarea>
+          <p id="linkImportHint" class="link-import-hint">
+            支持抖音、Bilibili、YouTube 和 TikTok；一次只导入一个视频。
+          </p>
+          <p id="linkImportError" class="link-import-error" role="alert" hidden></p>
+          <div class="dialog-actions">
+            <button id="pasteLinkBtn" class="secondary-button" type="button">粘贴</button>
+            <button id="submitLinkImportBtn" type="submit">解析并导入</button>
+          </div>
+        </form>
+
+        <section id="linkImportProgress" class="link-import-progress" aria-live="polite" hidden>
+          <div class="link-progress-heading">
+            <strong id="linkImportStatusText">正在检查视频链接</strong>
+            <span id="linkImportProgressValue">5%</span>
+          </div>
+          <div class="progress" aria-hidden="true">
+            <div id="linkImportProgressBar"></div>
+          </div>
+          <p class="link-progress-note">下载文件只会保存在本机，并在完成后加入历史记录。</p>
+          <div class="dialog-actions">
+            <button id="cancelLinkImportBtn" class="danger-button" type="button">终止导入</button>
+          </div>
+        </section>
+      </div>
+    </dialog>
+
+    <script src="/app.js?v=20260729-1"></script>
   </body>
 </html>

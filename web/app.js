@@ -1,5 +1,6 @@
 const fileInput = document.getElementById("fileInput");
 const importBtn = document.getElementById("importBtn");
+const linkImportBtn = document.getElementById("linkImportBtn");
 const startBtn = document.getElementById("startBtn");
 const preset = document.getElementById("preset");
 const cancelBtn = document.getElementById("cancelBtn");
@@ -20,16 +21,44 @@ const historyBackdrop = document.getElementById("historyBackdrop");
 const openHistoryBtn = document.getElementById("openHistoryBtn");
 const closeHistoryBtn = document.getElementById("closeHistoryBtn");
 const historySearchInput = document.getElementById("historySearchInput");
+const linkImportDialog = document.getElementById("linkImportDialog");
+const closeLinkImportBtn = document.getElementById("closeLinkImportBtn");
+const linkImportForm = document.getElementById("linkImportForm");
+const linkImportText = document.getElementById("linkImportText");
+const linkImportError = document.getElementById("linkImportError");
+const pasteLinkBtn = document.getElementById("pasteLinkBtn");
+const submitLinkImportBtn = document.getElementById("submitLinkImportBtn");
+const linkImportProgress = document.getElementById("linkImportProgress");
+const linkImportStatusText = document.getElementById("linkImportStatusText");
+const linkImportProgressValue = document.getElementById("linkImportProgressValue");
+const linkImportProgressBar = document.getElementById("linkImportProgressBar");
+const cancelLinkImportBtn = document.getElementById("cancelLinkImportBtn");
 
 const STORAGE_KEYS = {
   activeHash: "videoTranscriber.activeHash",
   playbackPrefix: "videoTranscriber.playback.",
 };
-const EXPECTED_API_VERSION = 2;
+const EXPECTED_API_VERSION = 3;
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
-const BUSY_STATUSES = new Set(["checking", "importing", "version_mismatch", ...ACTIVE_STATUSES]);
+const LINK_IMPORT_ACTIVE_STATUSES = new Set([
+  "link_resolving",
+  "link_downloading",
+  "link_saving",
+  "link_cancelling",
+]);
+const BUSY_STATUSES = new Set([
+  "checking",
+  "importing",
+  "version_mismatch",
+  ...ACTIVE_STATUSES,
+  ...LINK_IMPORT_ACTIVE_STATUSES,
+]);
 
 let pollTimer = null;
+let linkImportPollTimer = null;
+let linkImportPollInFlight = false;
+let activeLinkImportTaskId = null;
+let statusBeforeLinkImport = "idle";
 let segments = [];
 let activeHash = null;
 let currentStatus = "checking";
@@ -58,6 +87,14 @@ function bindActionEvents() {
     fileInput.value = "";
     if (file) await importVideo(file);
   });
+  linkImportBtn.addEventListener("click", openLinkImportDialog);
+  closeLinkImportBtn.addEventListener("click", closeLinkImportDialog);
+  linkImportDialog.addEventListener("cancel", (event) => {
+    if (activeLinkImportTaskId) event.preventDefault();
+  });
+  linkImportForm.addEventListener("submit", startLinkImport);
+  pasteLinkBtn.addEventListener("click", pasteLinkFromClipboard);
+  cancelLinkImportBtn.addEventListener("click", cancelLinkImport);
   startBtn.addEventListener("click", startTranscription);
   cancelBtn.addEventListener("click", cancelTranscription);
 }
@@ -69,6 +106,7 @@ function bindHistoryEvents() {
   historySearchInput.addEventListener("input", renderHistory);
   refreshHistoryBtn.addEventListener("click", loadHistory);
   window.addEventListener("keydown", (event) => {
+    if (linkImportDialog.open) return;
     if (event.key !== "Escape" || historyCollapsed) return;
     event.preventDefault();
     setHistoryCollapsed(true);
@@ -134,6 +172,177 @@ async function importVideo(file) {
   } finally {
     updateControls();
   }
+}
+
+function openLinkImportDialog() {
+  if (isBusy()) return;
+  linkImportError.hidden = true;
+  linkImportProgress.hidden = true;
+  linkImportForm.hidden = false;
+  linkImportDialog.showModal();
+  window.setTimeout(() => linkImportText.focus(), 0);
+}
+
+function closeLinkImportDialog() {
+  if (activeLinkImportTaskId) return;
+  linkImportDialog.close();
+}
+
+async function pasteLinkFromClipboard() {
+  linkImportError.hidden = true;
+  try {
+    linkImportText.value = await navigator.clipboard.readText();
+    linkImportText.focus();
+  } catch {
+    showLinkImportError("浏览器未允许读取剪贴板，请使用 Ctrl+V 手动粘贴。");
+  }
+}
+
+async function startLinkImport(event) {
+  event.preventDefault();
+  if (isBusy()) return;
+  const text = linkImportText.value.trim();
+  if (!text) {
+    showLinkImportError("请输入视频链接或分享文本。");
+    linkImportText.focus();
+    return;
+  }
+
+  statusBeforeLinkImport = currentStatus;
+  currentStatus = "link_resolving";
+  linkImportError.hidden = true;
+  showLinkImportProgress("正在检查视频链接", 5);
+  updateControls();
+  try {
+    const response = await fetch("/api/link-import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) throw new Error(await readApiError(response));
+    const data = await response.json();
+    activeLinkImportTaskId = data.task_id;
+    pollLinkImport(activeLinkImportTaskId);
+  } catch (error) {
+    currentStatus = statusBeforeLinkImport;
+    activeLinkImportTaskId = null;
+    linkImportProgress.hidden = true;
+    linkImportForm.hidden = false;
+    showLinkImportError(error.message);
+    updateControls();
+  }
+}
+
+function showLinkImportProgress(message, progress) {
+  linkImportForm.hidden = true;
+  linkImportProgress.hidden = false;
+  const value = Math.max(0, Math.min(100, Number(progress) || 0));
+  linkImportStatusText.textContent = message;
+  linkImportProgressBar.style.width = `${value}%`;
+  linkImportProgressValue.textContent = `${Math.round(value)}%`;
+}
+
+function pollLinkImport(taskId) {
+  clearInterval(linkImportPollTimer);
+  refreshLinkImport(taskId);
+  linkImportPollTimer = window.setInterval(() => refreshLinkImport(taskId), 900);
+}
+
+async function refreshLinkImport(taskId) {
+  if (!taskId || taskId !== activeLinkImportTaskId || linkImportPollInFlight) return;
+  linkImportPollInFlight = true;
+  try {
+    const response = await fetch(`/api/link-import/${taskId}`);
+    if (!response.ok) throw new Error(await readApiError(response));
+    const data = await response.json();
+    if (LINK_IMPORT_ACTIVE_STATUSES.has(data.status)) {
+      currentStatus = data.status;
+      showLinkImportProgress(data.message, data.progress);
+      cancelLinkImportBtn.disabled = data.status === "link_cancelling";
+      updateControls();
+      return;
+    }
+
+    stopLinkImportPolling();
+    if (data.status === "done" && data.result) {
+      await finishLinkImport(data.result);
+      return;
+    }
+
+    currentStatus = currentItemStatus || (activeHash ? "untranscribed" : "idle");
+    updateControls();
+    if (data.status === "cancelled") {
+      linkImportDialog.close();
+      return;
+    }
+    linkImportProgress.hidden = true;
+    linkImportForm.hidden = false;
+    showLinkImportError(data.error || "链接导入失败，请稍后重试。");
+  } catch (error) {
+    stopLinkImportPolling();
+    currentStatus = currentItemStatus || (activeHash ? "untranscribed" : "idle");
+    linkImportProgress.hidden = true;
+    linkImportForm.hidden = false;
+    showLinkImportError(error.message);
+    updateControls();
+  } finally {
+    linkImportPollInFlight = false;
+  }
+}
+
+async function finishLinkImport(result) {
+  activeHash = result.hash;
+  currentItemStatus = result.item.status;
+  currentStatus = currentItemStatus;
+  saveActiveHash(activeHash);
+  setVideoSource(`/api/video?t=${Date.now()}`, activeHash);
+  if (currentItemStatus === "done") {
+    await loadResult();
+  } else {
+    renderTranscript([], "未转写");
+  }
+  await loadHistory();
+  linkImportText.value = "";
+  linkImportError.hidden = true;
+  linkImportDialog.close();
+  updateControls();
+}
+
+async function cancelLinkImport() {
+  if (!activeLinkImportTaskId || currentStatus === "link_cancelling") return;
+  cancelLinkImportBtn.disabled = true;
+  try {
+    const response = await fetch(`/api/link-import/${activeLinkImportTaskId}/cancel`, { method: "POST" });
+    if (!response.ok) throw new Error(await readApiError(response));
+    currentStatus = "link_cancelling";
+    showLinkImportProgress("正在终止链接导入", linkImportProgressValue.textContent.replace("%", ""));
+    updateControls();
+  } catch (error) {
+    cancelLinkImportBtn.disabled = false;
+    linkImportStatusText.textContent = `终止失败：${error.message}`;
+  }
+}
+
+function stopLinkImportPolling() {
+  clearInterval(linkImportPollTimer);
+  linkImportPollTimer = null;
+  activeLinkImportTaskId = null;
+  cancelLinkImportBtn.disabled = false;
+}
+
+function showLinkImportError(message) {
+  linkImportError.textContent = message;
+  linkImportError.hidden = false;
+}
+
+async function readApiError(response) {
+  try {
+    const data = await response.json();
+    if (typeof data.detail === "string") return data.detail;
+  } catch {
+    // Fall through to the status text when the backend did not return JSON.
+  }
+  return response.statusText || `请求失败（${response.status}）`;
 }
 
 async function startTranscription() {
@@ -400,6 +609,25 @@ async function restoreSession() {
   currentStatus = statusData?.status || "idle";
   await loadHistory();
 
+  if (statusData && LINK_IMPORT_ACTIVE_STATUSES.has(statusData.status)) {
+    activeHash = statusData.hash || getStoredActiveHash();
+    if (activeHash) {
+      const activeItem = historyItems.find((item) => item.hash === activeHash);
+      currentItemStatus = activeItem?.status || "untranscribed";
+      saveActiveHash(activeHash);
+      setVideoSource(`/api/video?t=${Date.now()}`, activeHash);
+      if (currentItemStatus === "done") await loadResult();
+      else renderTranscript([], "未转写");
+    }
+    activeLinkImportTaskId = statusData.id;
+    statusBeforeLinkImport = currentItemStatus || (activeHash ? "untranscribed" : "idle");
+    showLinkImportProgress(statusData.message, statusData.progress);
+    if (!linkImportDialog.open) linkImportDialog.showModal();
+    updateControls();
+    pollLinkImport(activeLinkImportTaskId);
+    return;
+  }
+
   if (statusData?.hash) {
     activeHash = statusData.hash;
     currentStatus = statusData.status;
@@ -432,6 +660,8 @@ async function restoreSession() {
 function showVersionMismatch() {
   clearInterval(pollTimer);
   pollTimer = null;
+  clearInterval(linkImportPollTimer);
+  linkImportPollTimer = null;
   currentStatus = "version_mismatch";
   currentItemStatus = null;
   renderTranscript([], "前后端版本不匹配，请通过启动快捷方式重新启动应用");
@@ -441,6 +671,7 @@ function showVersionMismatch() {
 function updateControls() {
   const busy = isBusy();
   importBtn.disabled = busy;
+  linkImportBtn.disabled = busy;
   if (currentStatus === "checking") {
     importBtn.textContent = "正在连接";
   } else if (currentStatus === "importing") {
@@ -448,8 +679,12 @@ function updateControls() {
   } else if (currentStatus === "version_mismatch") {
     importBtn.textContent = "请重启应用";
   } else {
-    importBtn.textContent = "导入视频";
+    importBtn.textContent = "导入本地视频";
   }
+  linkImportBtn.textContent = LINK_IMPORT_ACTIVE_STATUSES.has(currentStatus) ? "正在链接导入" : "链接导入";
+  closeLinkImportBtn.disabled = Boolean(activeLinkImportTaskId);
+  pasteLinkBtn.disabled = busy;
+  submitLinkImportBtn.disabled = busy;
   preset.disabled = busy;
   startBtn.disabled = busy || !activeHash;
   startBtn.textContent = currentItemStatus === "done" ? "重新转写" : "开始转写";

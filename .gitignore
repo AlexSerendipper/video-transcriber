@@ -20,6 +20,7 @@ server.err.log
 # Local/editor files
 .env
 .env.*
+.cookies.json
 .vscode/
 .idea/
 

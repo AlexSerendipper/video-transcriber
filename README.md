@@ -11,6 +11,7 @@ The core workflow is deliberately split into two steps:
 
 - Local browser UI at `http://127.0.0.1:8876`
 - Separate video import and transcription actions
+- Local file import plus link import for Douyin, Bilibili, YouTube, and TikTok
 - Immediate playback after import
 - Local history keyed by SHA-256 file content hash
 - Duplicate import detection that reopens the existing record
@@ -33,6 +34,8 @@ The core workflow is deliberately split into two steps:
 - Windows
 - Python 3.10+
 - NVIDIA GPU recommended
+- `D:\GitProject\yt-dlp\yt-dlp.exe` for Bilibili, YouTube, and TikTok link imports
+- `D:\GitProject\douyin-downloader` with its local configuration for Douyin link imports
 
 Python dependencies are installed into `.venv` on first run. CUDA runtime DLLs required by `ctranslate2` are provided through Python packages on Windows.
 
@@ -89,7 +92,7 @@ To use another port:
 
 ### Import a video
 
-Click `导入视频` and select a supported video or audio file. Importing immediately:
+Click `导入本地视频` and select a supported video or audio file. Importing immediately:
 
 - copies the media into local history;
 - opens it in the player;
@@ -97,6 +100,18 @@ Click `导入视频` and select a supported video or audio file. Importing immed
 - enables `开始转写`.
 
 Importing the same file again opens the existing history record instead of creating another copy or overwriting its transcript.
+
+### Import from a link
+
+Click `链接导入`, then paste either a video URL or the complete share text containing that URL. The app extracts the first link, resolves one video, downloads it to an isolated temporary directory, and adds the result to the same local history used by file imports.
+
+Supported sites are Douyin, Bilibili, YouTube, and TikTok. Playlists, local/private-network addresses, and unsupported domains are rejected. Link import runs as a cancellable background task; importing, transcription, history switching, and deletion remain disabled until it finishes or stops. The previously opened video remains playable.
+
+Records imported from links store the public canonical page URL, platform, and platform video ID. Re-importing the same platform video reopens its existing record before downloading when possible; the SHA-256 content hash remains the final duplicate check.
+
+The history label comes from the title returned by the source resolver rather than the temporary download filename. Resolver subprocesses are forced to emit UTF-8 so Chinese titles remain readable on Windows. If the same linked media already exists by content hash, re-importing it refreshes the saved title and public source metadata without replacing an existing transcript.
+
+The downloader locations can be overridden with `VIDEO_TRANSCRIBER_YT_DLP` and `VIDEO_TRANSCRIBER_DOUYIN_ROOT`. Cookies, request headers, and temporary media URLs are never written into history metadata.
 
 ### Transcribe
 
@@ -142,7 +157,7 @@ data/items/<file_hash>/
 Each directory contains:
 
 - a local media copy named `source.<extension>`;
-- `result.json` with the original filename, status, timestamps, duration, and transcript segments.
+- `result.json` with the display title, status, timestamps, duration, transcript segments, and optional public link source metadata, including the resolver's original `source_title`.
 
 The primary persistent states are:
 
@@ -173,9 +188,13 @@ Refresh once with `Ctrl + Shift + R`. CSS and JavaScript URLs include explicit v
 
 This indicates an outdated backend is still serving the port. Start the app again through `launch.ps1` or the shortcut. The launcher checks `api_version` and safely replaces an idle outdated project backend.
 
-The current frontend/backend protocol version is `2`. If a page is opened directly against another version, the frontend disables actions and asks the user to restart through the launcher.
+The current frontend/backend protocol version is `3`. If a page is opened directly against another version, the frontend disables actions and asks the user to restart through the launcher.
 
 It will not automatically stop an outdated backend while that backend reports an active transcription task.
+
+### A title imported from a link is garbled
+
+Restart the app so the current backend code is loaded, then import the same link again. Link-import resolver output is decoded as UTF-8, and a duplicate content match refreshes the existing history title and public source metadata without overwriting its transcript.
 
 ## Do Not Commit
 
@@ -186,6 +205,7 @@ The following are local-only and ignored:
 - `temp/`
 - `server.log`
 - `server.err.log`
+- `.cookies.json`
 - Python cache files
 
 Do not commit local videos, transcripts, model caches, credentials, or environment files.
